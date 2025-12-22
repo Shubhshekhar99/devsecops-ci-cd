@@ -1,0 +1,90 @@
+pipeline {
+    agent any
+
+    environment {
+        SONAR_HOME = tool "Sonar"
+    }
+
+    stages {
+
+
+        stage("Clone Code from GitHub") {
+            steps {
+                git url: "https://github.com/saransh-del/Wanderlust.git", branch: "main"
+            }
+        }
+
+       
+        stage("SonarQube Quality Analysis") {
+            steps {
+                withSonarQubeEnv("Sonar") {
+                    sh """
+                        ${SONAR_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectName=wanderlust \
+                        -Dsonar.projectKey=wanderlust \
+                        -Dsonar.sources=.
+                    """
+                }
+            }
+        }
+
+        stage("Sonar Quality Gate") {
+            steps {
+                timeout(time: 2, unit: "MINUTES") {
+                    waitForQualityGate abortPipeline: false
+                }
+            }
+        }
+
+       
+        stage("OWASP Dependency Check") {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./', odcInstallation: 'dc'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+
+       
+        stage("Trivy File System Scan") {
+            steps {
+                sh '''
+                  trivy fs . --format table -o trivy-fs-report.html || true
+                '''
+            }
+        }
+
+        
+        stage("Deploy using Docker Compose") {
+            steps {
+                sh '''
+                  docker compose down || true
+                  docker compose build --no-cache
+                  docker compose up -d
+                '''
+            }
+        }
+
+      
+        stage("DAST - OWASP ZAP Scan") {
+            steps {
+                sh '''
+                  docker run --rm \
+                    --user root \
+                    -v $(pwd):/zap/wrk \
+                    ghcr.io/zaproxy/zaproxy:stable \
+                    zap-baseline.py \
+                    -t http://54.227.83.208:8080 \
+                    -r zap-dast-report.html \
+                    -m 3 || true
+                '''
+            }
+        }
+    }
+
+    
+    post {
+        always {
+            archiveArtifacts artifacts: '*.html', allowEmptyArchive: true
+        }
+    }
+}
