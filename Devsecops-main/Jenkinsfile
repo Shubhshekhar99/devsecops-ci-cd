@@ -1,1 +1,102 @@
-
+pipeline {
+    agent any
+ 
+    environment {
+        SONAR_HOME = tool "Sonar"
+    }
+ 
+    stages {
+ 
+        stage("github clonning") {
+            steps {
+                git url: "https://github.com/SambhavSinghChouhan-CN/Devsecops.git", branch: "main"
+            }
+        }
+ 
+        
+        stage("code coverage") {
+    steps {
+        sh '''
+          docker run --rm \
+            -v $(pwd)/backend:/app \
+            -w /app \
+            node:18 \
+            sh -c "npm install && npm test -- --coverage || true"
+        '''
+    }
+}
+ 
+        
+        stage("quality analysis with SonarQube") {
+            steps {
+                withSonarQubeEnv("Sonar") {
+                    sh """
+                        ${SONAR_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectName=wanderlust \
+                        -Dsonar.projectKey=wanderlust \
+                        -Dsonar.sources=. \
+                        -Dsonar.javascript.lcov.reportPaths=backend/coverage/lcov.info
+                    """
+                }
+            }
+        }
+ 
+        stage("Quality Gate of SonarQube") {
+            steps {
+                timeout(time: 2, unit: "MINUTES") {
+                    waitForQualityGate abortPipeline: false
+                }
+            }
+        }
+ 
+        
+        stage("Dependency Check") {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./', odcInstallation: 'dc'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+ 
+        
+        stage("FILE SCAN done by TRIVY") {
+            steps {
+                sh '''
+                  trivy fs . --format table -o trivy-fs-report.html || true
+                '''
+            }
+        }
+ 
+        
+        stage("Deploying Application with Docker Compose") {
+            steps {
+                sh '''
+                  docker-compose down || true
+                  docker-compose build --no-cache
+                  docker-compose up -d
+                '''
+            }
+        }
+ 
+        
+        stage("DAST by OWASP ZAP ") {
+            steps {
+                sh '''
+                  docker run --rm \
+                    --user root \
+                    -v $(pwd):/zap/wrk \
+                    ghcr.io/zaproxy/zaproxy:stable \
+                    zap-baseline.py \
+                    -t http://54.193.36.99:8080 \
+                    -r zap-dast-report.html \
+                    -m 3 || true
+                '''
+            }
+        }
+    }
+ 
+    post {
+        always {
+            archiveArtifacts artifacts: '*.html', allowEmptyArchive: true
+        }
+    }
+}
